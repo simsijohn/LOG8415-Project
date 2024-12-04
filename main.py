@@ -1,5 +1,3 @@
-# main.py
-
 import sys
 import boto3
 import os
@@ -253,186 +251,176 @@ def launch_instance_worker(ec2_client, image_id, instance_type, key_name, securi
     """
     # Format the worker_user_data with actual variables
     worker_user_data = (r"""#!/bin/bash
-set -x
-exec > /var/log/user-data.log 2>&1
-
-echo "===== Starting Worker User Data Script ====="
-
-# ==========================
-# Configuration Variables
-# ==========================
-
-MYSQL_ROOT_PASSWORD="{MYSQL_ROOT_PASSWORD}"
-REPLICATION_USER="{REPLICATION_USER}"
-REPLICATION_PASSWORD="{REPLICATION_PASSWORD}"
-
-# Manager Instance Details
-MANAGER_PRIVATE_IP="{MANAGER_PRIVATE_IP}"
-
-# Master Log File and Position
-MASTER_LOG_FILE="{MASTER_LOG_FILE}"
-MASTER_LOG_POS={MASTER_LOG_POS}
-
-# ==========================
-# System Update & Upgrade
-# ==========================
-
-echo "Updating and upgrading the system..."
-apt-get update -y
-apt-get upgrade -y
-
-# ==========================
-# Install MySQL Server
-# ==========================
-
-echo "Installing MySQL server..."
-apt-get install mysql-server -y
-
-# ==========================
-# Secure MySQL Installation
-# ==========================
-
-echo "Securing MySQL installation..."
-
-# Change root password and authentication method
-mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${MYSQL_ROOT_PASSWORD}';"
-
-# Remove anonymous users
-mysql -e "DELETE FROM mysql.user WHERE User='';"
-
-# Disallow root remote login
-mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${MYSQL_ROOT_PASSWORD}';"
-
-# Remove test database
-mysql -e "DROP DATABASE IF EXISTS test;"
-mysql -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
-
-# Reload privilege tables
-mysql -e "FLUSH PRIVILEGES;"
-
-# ==========================
-# Configure MySQL for Replication
-# ==========================
-
-echo "Configuring MySQL for replication..."
-
-# Backup existing configuration
-cp /etc/mysql/mysql.conf.d/mysqld.cnf /etc/mysql/mysql.conf.d/mysqld.cnf.bak
-
-# Dynamically assign server-id based on private IP
-echo "Determining server-id dynamically based on private IP..."
-PRIVATE_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
-# Extract the last octet of the IP and add 2 to assign server-id
-LAST_OCTET=$(echo $PRIVATE_IP | awk -F. '{print $4}')
-SERVER_ID=$((LAST_OCTET + 2))
-
-echo "Assigned server-id=${SERVER_ID}"
-
-# Remove any existing server-id from configuration
-sed -i '/server-id/d' /etc/mysql/mysql.conf.d/mysqld.cnf
-
-# Append replication settings with dynamic server-id
-bash -c "echo 'server-id=${SERVER_ID}' >> /etc/mysql/mysql.conf.d/mysqld.cnf"
-bash -c "echo 'relay_log=/var/log/mysql/mysql-relay-bin.log' >> /etc/mysql/mysql.conf.d/mysqld.cnf"
-bash -c "echo 'relay_log_index=/var/log/mysql/mysql-relay-bin.index' >> /etc/mysql/mysql.conf.d/mysqld.cnf"
-bash -c "echo 'log_bin=/var/log/mysql/mysql-bin.log' >> /etc/mysql/mysql.conf.d/mysqld.cnf"
-bash -c "echo 'binlog_do_db=sakila' >> /etc/mysql/mysql.conf.d/mysqld.cnf"
-bash -c "echo 'bind-address=0.0.0.0' >> /etc/mysql/mysql.conf.d/mysqld.cnf"
-
-# Restart MySQL to apply changes
-echo "Restarting MySQL service..."
-systemctl restart mysql
-
-# Verify MySQL service status
-if systemctl is-active --quiet mysql; then
-    echo "MySQL service restarted successfully."
-else
-    echo "MySQL service failed to restart."
-    exit 1
-fi
-
-# ==========================
-# Configure Replication
-# ==========================
-
-echo "Configuring replication settings..."
-
-# Wait until MySQL is ready on the Worker
-until mysqladmin ping -u root -p"{MYSQL_ROOT_PASSWORD}" --silent; do
-    echo "Waiting for MySQL service to be available..."
-    sleep 5
-done
-
-# Configure the Slave to connect to the Master
-echo "Setting up replication to master at {MANAGER_PRIVATE_IP}..."
-mysql -u root -p"{MYSQL_ROOT_PASSWORD}" -e "
-CHANGE MASTER TO 
-    MASTER_HOST='{MANAGER_PRIVATE_IP}', 
-    MASTER_USER='{REPLICATION_USER}', 
-    MASTER_PASSWORD='{REPLICATION_PASSWORD}', 
-    MASTER_LOG_FILE='{MASTER_LOG_FILE}', 
-    MASTER_LOG_POS={MASTER_LOG_POS};
-"
-
-# Start the Slave replication process
-echo "Starting slave replication..."
-mysql -u root -p"{MYSQL_ROOT_PASSWORD}" -e "START SLAVE;"
-
-# ==========================
-# Verify Replication Status
-# ==========================
-
-echo "Verifying replication status..."
-SLAVE_IO_RUNNING=$(mysql -u root -p"{MYSQL_ROOT_PASSWORD}" -e "SHOW SLAVE STATUS\\G" | grep Slave_IO_Running | awk '{{print $2}}')
-SLAVE_SQL_RUNNING=$(mysql -u root -p"{MYSQL_ROOT_PASSWORD}" -e "SHOW SLAVE STATUS\\G" | grep Slave_SQL_Running | awk '{{print $2}}')
-
-echo "Slave_IO_Running: ${SLAVE_IO_RUNNING}"
-echo "Slave_SQL_Running: ${SLAVE_SQL_RUNNING}"
-
-if [[ "$SLAVE_IO_RUNNING" == "Yes" && "$SLAVE_SQL_RUNNING" == "Yes" ]]; then
-    echo "Replication is running successfully."
-else
-    echo "Replication failed to start."
-    exit 1
-fi
-
-# ==========================
-# Install Sakila Database
-# ==========================
-
-echo "Installing Sakila database..."
-
-cd /tmp
-wget https://downloads.mysql.com/docs/sakila-db.tar.gz
-tar -xvf sakila-db.tar.gz
-
-# Import Sakila schema
-echo "Importing Sakila schema..."
-mysql -u root -p"{MYSQL_ROOT_PASSWORD}" < /tmp/sakila-db/sakila-schema.sql
-
-# Import Sakila data
-echo "Importing Sakila data..."
-mysql -u root -p"{MYSQL_ROOT_PASSWORD}" < /tmp/sakila-db/sakila-data.sql
-
-# ==========================
-# Firewall Configuration (Optional)
-# ==========================
-
-# Uncomment the following lines if you want to enable UFW and allow MySQL traffic from Manager
-# echo "Configuring UFW firewall..."
-# ufw allow 22/tcp
-# ufw allow from {MANAGER_PRIVATE_IP} to any port 3306
-# ufw --force enable
-
-# ==========================
-# Cleanup
-# ==========================
-
-echo "Cleaning up temporary files..."
-rm -rf /tmp/sakila-db.tar.gz /tmp/sakila-db
-
-echo "===== Worker User Data Script Completed ====="
-""").format(
+        set -x
+        exec > /var/log/user-data.log 2>&1
+        
+        echo "===== Starting Worker User Data Script ====="
+        
+        # ==========================
+        # Configuration Variables
+        # ==========================
+        
+        MYSQL_ROOT_PASSWORD="{MYSQL_ROOT_PASSWORD}"
+        REPLICATION_USER="{REPLICATION_USER}"
+        REPLICATION_PASSWORD="{REPLICATION_PASSWORD}"
+        
+        # Manager Instance Details
+        MANAGER_PRIVATE_IP="{MANAGER_PRIVATE_IP}"
+        
+        # Master Log File and Position
+        MASTER_LOG_FILE="{MASTER_LOG_FILE}"
+        MASTER_LOG_POS={MASTER_LOG_POS}
+        
+        # ==========================
+        # System Update & Upgrade
+        # ==========================
+        
+        echo "Updating and upgrading the system..."
+        apt-get update -y
+        apt-get upgrade -y
+        
+        # ==========================
+        # Install MySQL Server
+        # ==========================
+        
+        echo "Installing MySQL server..."
+        apt-get install mysql-server -y
+        
+        # ==========================
+        # Secure MySQL Installation
+        # ==========================
+        
+        echo "Securing MySQL installation..."
+        
+        # Change root password and authentication method
+        mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${MYSQL_ROOT_PASSWORD}';"
+        
+        # Remove anonymous users
+        mysql -e "DELETE FROM mysql.user WHERE User='';"
+        
+        # Disallow root remote login
+        mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${MYSQL_ROOT_PASSWORD}';"
+        
+        # Remove test database
+        mysql -e "DROP DATABASE IF EXISTS test;"
+        mysql -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
+        
+        # Reload privilege tables
+        mysql -e "FLUSH PRIVILEGES;"
+        
+        # ==========================
+        # Configure MySQL for Replication
+        # ==========================
+        
+        echo "Configuring MySQL for replication..."
+        
+        # Backup existing configuration
+        cp /etc/mysql/mysql.conf.d/mysqld.cnf /etc/mysql/mysql.conf.d/mysqld.cnf.bak
+        
+        # Dynamically assign server-id based on private IP
+        echo "Determining server-id dynamically based on private IP..."
+        PRIVATE_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
+        # Extract the last octet of the IP and add 2 to assign server-id
+        LAST_OCTET=$(echo $PRIVATE_IP | awk -F. '{print $4}')
+        SERVER_ID=$((LAST_OCTET + 2))
+        
+        echo "Assigned server-id=${SERVER_ID}"
+        
+        # Remove any existing server-id from configuration
+        sed -i '/server-id/d' /etc/mysql/mysql.conf.d/mysqld.cnf
+        
+        # Append replication settings with dynamic server-id
+        bash -c "echo 'server-id=${SERVER_ID}' >> /etc/mysql/mysql.conf.d/mysqld.cnf"
+        bash -c "echo 'relay_log=/var/log/mysql/mysql-relay-bin.log' >> /etc/mysql/mysql.conf.d/mysqld.cnf"
+        bash -c "echo 'relay_log_index=/var/log/mysql/mysql-relay-bin.index' >> /etc/mysql/mysql.conf.d/mysqld.cnf"
+        bash -c "echo 'log_bin=/var/log/mysql/mysql-bin.log' >> /etc/mysql/mysql.conf.d/mysqld.cnf"
+        bash -c "echo 'binlog_do_db=sakila' >> /etc/mysql/mysql.conf.d/mysqld.cnf"
+        bash -c "echo 'bind-address=0.0.0.0' >> /etc/mysql/mysql.conf.d/mysqld.cnf"
+        
+        # Restart MySQL to apply changes
+        echo "Restarting MySQL service..."
+        systemctl restart mysql
+        
+        # Verify MySQL service status
+        if systemctl is-active --quiet mysql; then
+            echo "MySQL service restarted successfully."
+        else
+            echo "MySQL service failed to restart."
+            exit 1
+        fi
+        
+        # ==========================
+        # Configure Replication
+        # ==========================
+        
+        echo "Configuring replication settings..."
+        
+        # Wait until MySQL is ready on the Worker
+        until mysqladmin ping -u root -p"{MYSQL_ROOT_PASSWORD}" --silent; do
+            echo "Waiting for MySQL service to be available..."
+            sleep 5
+        done
+        
+        # Configure the Slave to connect to the Master
+        echo "Setting up replication to master at {MANAGER_PRIVATE_IP}..."
+        mysql -u root -p"{MYSQL_ROOT_PASSWORD}" -e "
+        CHANGE MASTER TO 
+            MASTER_HOST='{MANAGER_PRIVATE_IP}', 
+            MASTER_USER='{REPLICATION_USER}', 
+            MASTER_PASSWORD='{REPLICATION_PASSWORD}', 
+            MASTER_LOG_FILE='{MASTER_LOG_FILE}', 
+            MASTER_LOG_POS={MASTER_LOG_POS};
+        "
+        
+        # Start the Slave replication process
+        echo "Starting slave replication..."
+        mysql -u root -p"{MYSQL_ROOT_PASSWORD}" -e "START SLAVE;"
+        
+        # ==========================
+        # Verify Replication Status
+        # ==========================
+        
+        echo "Verifying replication status..."
+        SLAVE_IO_RUNNING=$(mysql -u root -p"{MYSQL_ROOT_PASSWORD}" -e "SHOW SLAVE STATUS\\G" | grep Slave_IO_Running | awk '{{print $2}}')
+        SLAVE_SQL_RUNNING=$(mysql -u root -p"{MYSQL_ROOT_PASSWORD}" -e "SHOW SLAVE STATUS\\G" | grep Slave_SQL_Running | awk '{{print $2}}')
+        
+        echo "Slave_IO_Running: ${SLAVE_IO_RUNNING}"
+        echo "Slave_SQL_Running: ${SLAVE_SQL_RUNNING}"
+        
+        if [[ "$SLAVE_IO_RUNNING" == "Yes" && "$SLAVE_SQL_RUNNING" == "Yes" ]]; then
+            echo "Replication is running successfully."
+        else
+            echo "Replication failed to start."
+            exit 1
+        fi
+        
+        # ==========================
+        # Install Sakila Database
+        # ==========================
+        
+        echo "Installing Sakila database..."
+        
+        cd /tmp
+        wget https://downloads.mysql.com/docs/sakila-db.tar.gz
+        tar -xvf sakila-db.tar.gz
+        
+        # Import Sakila schema
+        echo "Importing Sakila schema..."
+        mysql -u root -p"{MYSQL_ROOT_PASSWORD}" < /tmp/sakila-db/sakila-schema.sql
+        
+        # Import Sakila data
+        echo "Importing Sakila data..."
+        mysql -u root -p"{MYSQL_ROOT_PASSWORD}" < /tmp/sakila-db/sakila-data.sql
+        
+        # ==========================
+        # Cleanup
+        # ==========================
+        
+        echo "Cleaning up temporary files..."
+        rm -rf /tmp/sakila-db.tar.gz /tmp/sakila-db
+        
+        echo "===== Worker User Data Script Completed ====="
+        """).format(
         MYSQL_ROOT_PASSWORD="123",
         REPLICATION_USER="replicator",
         REPLICATION_PASSWORD="123",
@@ -547,161 +535,151 @@ def main():
 
         # Manager User Data Script
         manager_user_data = (r"""#!/bin/bash
-set -x
-exec > /var/log/user-data.log 2>&1
-
-echo "===== Starting Manager User Data Script ====="
-
-# ==========================
-# Configuration Variables
-# ==========================
-
-MYSQL_ROOT_PASSWORD="123"
-REPLICATION_USER="replicator"
-REPLICATION_PASSWORD="123"
-
-# ==========================
-# System Update & Upgrade
-# ==========================
-
-echo "Updating and upgrading the system..."
-apt-get update -y
-apt-get upgrade -y
-
-# ==========================
-# Install MySQL Server
-# ==========================
-
-echo "Installing MySQL server..."
-apt-get install mysql-server -y
-
-# ==========================
-# Secure MySQL Installation
-# ==========================
-
-echo "Securing MySQL installation..."
-
-# Change root password and authentication method
-mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${MYSQL_ROOT_PASSWORD}';"
-
-# Remove anonymous users
-mysql -e "DELETE FROM mysql.user WHERE User='';"
-
-# Disallow root remote login
-mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${MYSQL_ROOT_PASSWORD}';"
-
-# Remove test database
-mysql -e "DROP DATABASE IF EXISTS test;"
-mysql -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
-
-# Reload privilege tables
-mysql -e "FLUSH PRIVILEGES;"
-
-# ==========================
-# Configure MySQL for Replication
-# ==========================
-
-echo "Configuring MySQL for replication..."
-
-# Backup existing configuration
-cp /etc/mysql/mysql.conf.d/mysqld.cnf /etc/mysql/mysql.conf.d/mysqld.cnf.bak
-
-# Append replication settings if not already present
-if ! grep -q "# Replication Configuration" /etc/mysql/mysql.conf.d/mysqld.cnf; then
-    cat <<EOF >> /etc/mysql/mysql.conf.d/mysqld.cnf
-
-# Replication Configuration
-server-id=1
-log_bin=/var/log/mysql/mysql-bin.log
-binlog_do_db=sakila
-EOF
-else
-    echo "Replication configuration already exists. Skipping append."
-fi
-
-# Restart MySQL to apply changes
-echo "Restarting MySQL service..."
-systemctl restart mysql
-
-# Verify MySQL service status
-if systemctl is-active --quiet mysql; then
-    echo "MySQL service restarted successfully."
-else
-    echo "MySQL service failed to restart."
-    exit 1
-fi
-
-# ==========================
-# Create Replication User
-# ==========================
-
-echo "Creating replication user..."
-mysql -u root -p"${MYSQL_ROOT_PASSWORD}" -e "
-CREATE USER '${REPLICATION_USER}'@'%' IDENTIFIED BY '${REPLICATION_PASSWORD}';
-GRANT REPLICATION SLAVE ON *.* TO '${REPLICATION_USER}'@'%';
-FLUSH PRIVILEGES;
-"
-
-# ==========================
-# Obtain Master Status
-# ==========================
-
-echo "Obtaining Master Status..."
-while true; do
-    MASTER_STATUS=$(mysql -u root -p"${MYSQL_ROOT_PASSWORD}" -e "SHOW MASTER STATUS;" | grep mysql-bin)
-    if [ -n "$MASTER_STATUS" ]; then
-        MASTER_LOG_FILE=$(echo $MASTER_STATUS | awk '{print $1}')
-        MASTER_LOG_POS=$(echo $MASTER_STATUS | awk '{print $2}')
-        break
-    fi
-    echo "Master status not available yet. Retrying in 5 seconds..."
-    sleep 5
-done
-
-echo "Master Log File: ${MASTER_LOG_FILE}"
-echo "Master Log Position: ${MASTER_LOG_POS}"
-
-# Save Master Status to a file
-echo "Master_Log_File: ${MASTER_LOG_FILE}" | tee /var/log/mysql/master_status.log
-echo "Master_Log_Pos: ${MASTER_LOG_POS}" | tee -a /var/log/mysql/master_status.log
-
-# ==========================
-# Install Sakila Database
-# ==========================
-
-echo "Installing Sakila database..."
-
-cd /tmp
-wget https://downloads.mysql.com/docs/sakila-db.tar.gz
-tar -xvf sakila-db.tar.gz
-
-# Import Sakila schema
-echo "Importing Sakila schema..."
-mysql -u root -p"${MYSQL_ROOT_PASSWORD}" < /tmp/sakila-db/sakila-schema.sql
-
-# Import Sakila data
-echo "Importing Sakila data..."
-mysql -u root -p"${MYSQL_ROOT_PASSWORD}" < /tmp/sakila-db/sakila-data.sql
-
-# ==========================
-# Firewall Configuration (Optional)
-# ==========================
-
-# Uncomment the following lines if you want to enable UFW and allow MySQL traffic from Manager
-# echo "Configuring UFW firewall..."
-# ufw allow 22/tcp
-# ufw allow from 10.0.0.0/16 to any port 3306
-# ufw --force enable
-
-# ==========================
-# Cleanup
-# ==========================
-
-echo "Cleaning up temporary files..."
-rm -rf /tmp/sakila-db.tar.gz /tmp/sakila-db
-
-echo "===== Manager User Data Script Completed ====="
-""").strip()
+        set -x
+        exec > /var/log/user-data.log 2>&1
+        
+        echo "===== Starting Manager User Data Script ====="
+        
+        # ==========================
+        # Configuration Variables
+        # ==========================
+        
+        MYSQL_ROOT_PASSWORD="123"
+        REPLICATION_USER="replicator"
+        REPLICATION_PASSWORD="123"
+        
+        # ==========================
+        # System Update & Upgrade
+        # ==========================
+        
+        echo "Updating and upgrading the system..."
+        apt-get update -y
+        apt-get upgrade -y
+        
+        # ==========================
+        # Install MySQL Server
+        # ==========================
+        
+        echo "Installing MySQL server..."
+        apt-get install mysql-server -y
+        
+        # ==========================
+        # Secure MySQL Installation
+        # ==========================
+        
+        echo "Securing MySQL installation..."
+        
+        # Change root password and authentication method
+        mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${MYSQL_ROOT_PASSWORD}';"
+        
+        # Remove anonymous users
+        mysql -e "DELETE FROM mysql.user WHERE User='';"
+        
+        # Disallow root remote login
+        mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${MYSQL_ROOT_PASSWORD}';"
+        
+        # Remove test database
+        mysql -e "DROP DATABASE IF EXISTS test;"
+        mysql -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
+        
+        # Reload privilege tables
+        mysql -e "FLUSH PRIVILEGES;"
+        
+        # ==========================
+        # Configure MySQL for Replication
+        # ==========================
+        
+        echo "Configuring MySQL for replication..."
+        
+        # Backup existing configuration
+        cp /etc/mysql/mysql.conf.d/mysqld.cnf /etc/mysql/mysql.conf.d/mysqld.cnf.bak
+        
+        # Append replication settings if not already present
+        if ! grep -q "# Replication Configuration" /etc/mysql/mysql.conf.d/mysqld.cnf; then
+            cat <<EOF >> /etc/mysql/mysql.conf.d/mysqld.cnf
+        
+        # Replication Configuration
+        server-id=1
+        log_bin=/var/log/mysql/mysql-bin.log
+        binlog_do_db=sakila
+        EOF
+        else
+            echo "Replication configuration already exists. Skipping append."
+        fi
+        
+        # Restart MySQL to apply changes
+        echo "Restarting MySQL service..."
+        systemctl restart mysql
+        
+        # Verify MySQL service status
+        if systemctl is-active --quiet mysql; then
+            echo "MySQL service restarted successfully."
+        else
+            echo "MySQL service failed to restart."
+            exit 1
+        fi
+        
+        # ==========================
+        # Create Replication User
+        # ==========================
+        
+        echo "Creating replication user..."
+        mysql -u root -p"${MYSQL_ROOT_PASSWORD}" -e "
+        CREATE USER '${REPLICATION_USER}'@'%' IDENTIFIED BY '${REPLICATION_PASSWORD}';
+        GRANT REPLICATION SLAVE ON *.* TO '${REPLICATION_USER}'@'%';
+        FLUSH PRIVILEGES;
+        "
+        
+        # ==========================
+        # Obtain Master Status
+        # ==========================
+        
+        echo "Obtaining Master Status..."
+        while true; do
+            MASTER_STATUS=$(mysql -u root -p"${MYSQL_ROOT_PASSWORD}" -e "SHOW MASTER STATUS;" | grep mysql-bin)
+            if [ -n "$MASTER_STATUS" ]; then
+                MASTER_LOG_FILE=$(echo $MASTER_STATUS | awk '{print $1}')
+                MASTER_LOG_POS=$(echo $MASTER_STATUS | awk '{print $2}')
+                break
+            fi
+            echo "Master status not available yet. Retrying in 5 seconds..."
+            sleep 5
+        done
+        
+        echo "Master Log File: ${MASTER_LOG_FILE}"
+        echo "Master Log Position: ${MASTER_LOG_POS}"
+        
+        # Save Master Status to a file
+        echo "Master_Log_File: ${MASTER_LOG_FILE}" | tee /var/log/mysql/master_status.log
+        echo "Master_Log_Pos: ${MASTER_LOG_POS}" | tee -a /var/log/mysql/master_status.log
+        
+        # ==========================
+        # Install Sakila Database
+        # ==========================
+        
+        echo "Installing Sakila database..."
+        
+        cd /tmp
+        wget https://downloads.mysql.com/docs/sakila-db.tar.gz
+        tar -xvf sakila-db.tar.gz
+        
+        # Import Sakila schema
+        echo "Importing Sakila schema..."
+        mysql -u root -p"${MYSQL_ROOT_PASSWORD}" < /tmp/sakila-db/sakila-schema.sql
+        
+        # Import Sakila data
+        echo "Importing Sakila data..."
+        mysql -u root -p"${MYSQL_ROOT_PASSWORD}" < /tmp/sakila-db/sakila-data.sql
+        
+        # ==========================
+        # Cleanup
+        # ==========================
+        
+        echo "Cleaning up temporary files..."
+        rm -rf /tmp/sakila-db.tar.gz /tmp/sakila-db
+        
+        echo "===== Manager User Data Script Completed ====="
+        """).strip()
 
         # Step 3: Launch Manager Instance
         logging.info("Launching Manager instance...")
@@ -742,13 +720,13 @@ echo "Proxy setup complete!" >> /home/ubuntu/setup.log
 
         logging.info("Launching Gatekeeper instance...")
         gatekeeper_user_data = ("""#!/bin/bash
-sudo apt update -y
-sudo apt install -y python3-pip python3-venv
-python3 -m venv /home/ubuntu/venv
-/home/ubuntu/venv/bin/pip install flask
-nohup python3 /home/ubuntu/gatekeeper.py &
-echo "Gatekeeper setup complete!" >> /home/ubuntu/setup.log
-""").strip()
+        sudo apt update -y
+        sudo apt install -y python3-pip python3-venv
+        python3 -m venv /home/ubuntu/venv
+        /home/ubuntu/venv/bin/pip install flask
+        nohup python3 /home/ubuntu/gatekeeper.py &
+        echo "Gatekeeper setup complete!" >> /home/ubuntu/setup.log
+        """).strip()
         gatekeeper_instance = launch_instance(
             ec2_client, image_id, 't2.large', key_name, public_security_group_id, subnet_id,
             gatekeeper_user_data, "Gatekeeper"
@@ -756,13 +734,13 @@ echo "Gatekeeper setup complete!" >> /home/ubuntu/setup.log
 
         logging.info("Launching Trusted Host instance...")
         trusted_host_user_data = ("""#!/bin/bash
-sudo apt update -y
-sudo apt install -y python3-pip python3-venv
-python3 -m venv /home/ubuntu/venv
-/home/ubuntu/venv/bin/pip install flask
-nohup python3 /home/ubuntu/trustedhost.py &
-echo "Trusted Host setup complete!" >> /home/ubuntu/setup.log
-""").strip()
+        sudo apt update -y
+        sudo apt install -y python3-pip python3-venv
+        python3 -m venv /home/ubuntu/venv
+        /home/ubuntu/venv/bin/pip install flask
+        nohup python3 /home/ubuntu/trustedhost.py &
+        echo "Trusted Host setup complete!" >> /home/ubuntu/setup.log
+        """).strip()
         trusted_host_instance = launch_instance(
             ec2_client, image_id, 't2.large', key_name, public_security_group_id, subnet_id,
             trusted_host_user_data, "TrustedHost"
