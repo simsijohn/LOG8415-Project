@@ -1,4 +1,4 @@
-# Cloud Computing TP3 Individual Project
+# LOG8415 - Individual Project
 
 ## Overview
 
