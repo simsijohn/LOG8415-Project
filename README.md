@@ -16,5 +16,5 @@ This project automates the deployment of a MySQL cluster with replication on AWS
 1. **Clone the Repository:**
 
    ```bash
-   git clone https://github.com/yourusername/Cloud_Computing_TP3_Individual.git
-   cd Cloud_Computing_TP3_Individual
+   git clone https://github.com/simsijohn/LOG8415-Project.git
+   cd LOG8415-Project
